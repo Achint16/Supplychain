@@ -1,6 +1,3 @@
-Last login: Thu Apr 24 11:14:19 on ttys001
-(base) achintya16@Achintyas-MacBook-Air ~ % vi requirements.txt
-
 streamlit
 pandas
 openpyxl
