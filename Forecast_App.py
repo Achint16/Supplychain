@@ -69,23 +69,17 @@ def reverse_pivot(df_original, pivot_updated):
     df['Qty'] = df['Weight'] * df['New_Qty']
     df_final = df[['Column1', 'Column2', 'Product', 'Date', 'Qty']]
 
-    # Show new rows only on demand
     if not new_combos.empty:
-        st.warning("⚠️ New combinations were introduced that don't exist in the original file.")
-
-        if st.checkbox("Show newly introduced records (with Date and Qty)"):
-            if 'Date' not in new_combos.columns:
-                new_combos['Date'] = new_combos['Month'].dt.to_period('M').dt.start_time.dt.strftime('%Y%m%d')
-
+        new_combos['Date'] = new_combos['Month'].dt.to_period('M').dt.start_time.dt.strftime('%Y%m%d')
+        if 'Site' in new_combos.columns:
             new_combos['Column1'] = new_combos['Site'].str.split('-').str[0]
             new_combos['Column2'] = new_combos['Site'].str.split('-').str[1]
-            new_combos['Qty'] = new_combos['New_Qty']
-            new_combos_display = new_combos[['Column1', 'Column2', 'Product', 'Date', 'Qty']]
-            st.dataframe(new_combos_display)
-
-            new_combos_display['Source'] = 'New'
-            df_final['Source'] = 'Original'
-            df_final = pd.concat([df_final, new_combos_display], ignore_index=True)
+        else:
+            new_combos['Column1'] = ''
+            new_combos['Column2'] = ''
+        new_combos['Qty'] = new_combos['New_Qty']
+        new_combos_display = new_combos[['Column1', 'Column2', 'Product', 'Date', 'Qty']]
+        df_final = pd.concat([df_final, new_combos_display], ignore_index=True)
 
     return df_final
 
@@ -96,14 +90,10 @@ def to_excel_download(df):
     output.seek(0)
     return output
 
-# -------------------------------
-# Streamlit App UI Starts Here
-# -------------------------------
-
-st.markdown(
-    "<h1 style='text-align:center; color:teal;'>Sales Forecast Adjustment</h1>",
-    unsafe_allow_html=True
-)
+# --- Streamlit UI ---
+st.markdown("""
+<h1 style='text-align:center; color:teal;'>Sales Forecast Adjustment</h1>
+""", unsafe_allow_html=True)
 
 step = st.radio("Step", ["Upload CSV", "Generate Pivot", "Upload Updated Pivot", "Download Final Output"])
 
@@ -112,6 +102,7 @@ if step == "Upload CSV":
     if uploaded_file:
         df = pd.read_csv(uploaded_file)
         st.session_state['df_original'] = df
+        st.success("✅ Original CSV uploaded and stored in session state.")
         st.write("Original Data Preview:")
         st.dataframe(df.head(), use_container_width=True)
 
@@ -121,6 +112,7 @@ elif step == "Generate Pivot":
         group_by_site = st.checkbox("Group by Site (Column1 + Column2)?", value=True)
         pivot = generate_pivot(st.session_state['df_original'], pivot_type, group_by_site)
         st.session_state['pivot'] = pivot
+        st.success("✅ Pivot generated and saved to session state.")
         st.write("Pivot Table Preview:")
         st.dataframe(pivot.head(), use_container_width=True)
 
@@ -134,13 +126,14 @@ elif step == "Upload Updated Pivot":
     if uploaded_pivot:
         pivot_updated = pd.read_excel(uploaded_pivot)
         st.session_state['pivot_updated'] = pivot_updated
+        st.success("✅ Pivot table uploaded and saved to session state.")
         st.write("Updated Pivot Preview:")
         st.dataframe(pivot_updated.head(), use_container_width=True)
 
 elif step == "Download Final Output":
     if 'df_original' in st.session_state and 'pivot_updated' in st.session_state:
         final_output = reverse_pivot(st.session_state['df_original'], st.session_state['pivot_updated'])
-        st.write("Final Output Preview (with Source column to highlight new rows):")
+        st.write("Final Output Preview:")
         st.dataframe(final_output.head(), use_container_width=True)
 
         csv = final_output.to_csv(index=False).encode('utf-8')
