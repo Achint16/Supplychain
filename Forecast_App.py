@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 from io import BytesIO
 
+# ---------------- UTILITY FUNCTIONS ----------------
+
 def rename_columns(df):
     rename_map = {
         'Column1': 'SiteCode',
@@ -30,19 +32,23 @@ def generate_pivot(df, pivot_type, group_by_site):
     df['Month'] = df['Date2'].dt.to_period('M').dt.to_timestamp()
     df['Week_Monday'] = df['Date2'].apply(lambda x: x - pd.Timedelta(days=x.weekday()) if pd.notnull(x) else x)
     df['Site'] = df['SiteCode'] + '-' + df['LocationCode']
+    df['Description'] = df['Description'].fillna('')  # keep blank descriptions
 
     index_fields = ['Product', 'Description']
     if group_by_site:
         index_fields = ['Site'] + index_fields
 
     if pivot_type == 'Month':
-        pivot = pd.pivot_table(df, index=index_fields, columns='Month', values='Qty', aggfunc='sum', fill_value=0)
+        pivot = pd.pivot_table(df, index=index_fields, columns='Month', values='Qty',
+                               aggfunc='sum', fill_value=0, dropna=False)
         pivot.columns = pivot.columns.strftime('%Y-%m')
     elif pivot_type == 'Week':
-        pivot = pd.pivot_table(df, index=index_fields, columns='Week_Monday', values='Qty', aggfunc='sum', fill_value=0)
+        pivot = pd.pivot_table(df, index=index_fields, columns='Week_Monday', values='Qty',
+                               aggfunc='sum', fill_value=0, dropna=False)
         pivot.columns = pivot.columns.strftime('%Y-%m-%d')
     elif pivot_type == 'Date':
-        pivot = pd.pivot_table(df, index=index_fields, columns='Date2', values='Qty', aggfunc='sum', fill_value=0)
+        pivot = pd.pivot_table(df, index=index_fields, columns='Date2', values='Qty',
+                               aggfunc='sum', fill_value=0, dropna=False)
         pivot.columns = pivot.columns.strftime('%Y-%m-%d')
     else:
         return None
@@ -51,12 +57,12 @@ def generate_pivot(df, pivot_type, group_by_site):
 
 def pivot_to_sage_format(pivot_df):
     pivot_df.columns = [col.strftime('%Y-%m') if isinstance(col, pd.Timestamp) else col for col in pivot_df.columns]
-    known_cols = [col for col in ['Site', 'Product', 'Description'] if col in pivot_df.columns]
-    pivot_flat = pivot_df.melt(id_vars=known_cols, var_name='Month', value_name='Qty')
-    pivot_flat['Month'] = pd.to_datetime(pivot_flat['Month'], format='%Y-%m')
+    id_vars = [col for col in ['Site', 'Product', 'Description'] if col in pivot_df.columns]
+    pivot_flat = pivot_df.melt(id_vars=id_vars, var_name='Month', value_name='Qty')
+    pivot_flat['Month'] = pd.to_datetime(pivot_flat['Month'], format='%Y-%m', errors='coerce')
     pivot_flat['Date'] = pivot_flat['Month'].dt.to_period('M').dt.start_time.dt.strftime('%Y%m%d')
 
-    if 'Site' in pivot_flat.columns:
+    if 'Site' in pivot_flat:
         pivot_flat['SiteCode'] = pivot_flat['Site'].str.split('-').str[0]
         pivot_flat['LocationCode'] = pivot_flat['Site'].str.split('-').str[1]
     else:
@@ -65,16 +71,10 @@ def pivot_to_sage_format(pivot_df):
 
     return pivot_flat[['SiteCode', 'LocationCode', 'Product', 'Description', 'Date', 'Qty']]
 
-# -------------------------------
-# Streamlit App UI Starts Here
-# -------------------------------
+# ---------------- STREAMLIT APP ----------------
+
 st.set_page_config(page_title="Sales Forecast Adjustment", layout="wide")
-
-st.markdown(
-    "<h1 style='text-align:center; color:teal;'>Sales Forecast Adjustment</h1>",
-    unsafe_allow_html=True
-)
-
+st.markdown("<h1 style='text-align:center; color:teal;'>Sales Forecast Adjustment</h1>", unsafe_allow_html=True)
 step = st.radio("Step", ["Upload CSV", "Generate Pivot", "Upload Updated Pivot", "Download Final Output"])
 
 if step == "Upload CSV":
@@ -107,33 +107,30 @@ elif step == "Upload Updated Pivot":
     if uploaded_pivot:
         df = pd.read_excel(uploaded_pivot)
         st.session_state['pivot_updated'] = df
-        st.success("✅ Pivot table uploaded and saved to session state.")
+        st.success("✅ Pivot table uploaded.")
         st.write("Updated Pivot Preview:")
         st.dataframe(df.head(), use_container_width=True)
 
 elif step == "Download Final Output":
-    if 'pivot_updated' in st.session_state and 'df_original' in st.session_state:
+    if all(k in st.session_state for k in ['pivot_updated', 'df_original', 'pivot']):
         df_updated = pivot_to_sage_format(st.session_state['pivot_updated'])
-        df_original = st.session_state['df_original'][['SiteCode', 'LocationCode', 'Product', 'Description', 'Date', 'Qty']].copy()
+        df_generated = pivot_to_sage_format(st.session_state['pivot'])
 
-        if 'pivot' in st.session_state:
-            df_generated = pivot_to_sage_format(st.session_state['pivot'])
+        key_cols = ['SiteCode', 'LocationCode', 'Product', 'Description', 'Date']
+        df_updated['key'] = df_updated[key_cols].astype(str).agg('-'.join, axis=1)
+        df_generated['key'] = df_generated[key_cols].astype(str).agg('-'.join, axis=1)
 
-            df_updated['key'] = df_updated[['SiteCode', 'LocationCode', 'Product', 'Description', 'Date']].astype(str).agg('-'.join, axis=1)
-            df_generated['key'] = df_generated[['SiteCode', 'LocationCode', 'Product', 'Description', 'Date']].astype(str).agg('-'.join, axis=1)
+        df_merged = df_updated.merge(df_generated[['key', 'Qty']], on='key', how='left', suffixes=('', '_orig'))
+        df_changed = df_merged[df_merged['Qty'] != df_merged['Qty_orig']].drop(columns=['key', 'Qty_orig'])
 
-            df_merged = df_updated.merge(df_generated[['key', 'Qty']], on='key', how='left', suffixes=('', '_orig'))
-            df_changed = df_merged[df_merged['Qty'] != df_merged['Qty_orig']].drop(columns=['key', 'Qty_orig'])
-
-            df_final = pd.concat([df_original, df_changed]).drop_duplicates(keep='last').reset_index(drop=True)
-        else:
-            df_final = pd.concat([df_original, df_updated]).drop_duplicates(keep='last').reset_index(drop=True)
-
-        df_final_cleaned = revert_column_names(df_final)
-        csv = df_final_cleaned.to_csv(index=False, header=False).encode('utf-8')
+        df_original = st.session_state['df_original'][key_cols + ['Qty']].copy()
+        df_final = pd.concat([df_original, df_changed]).drop_duplicates(subset=key_cols, keep='last').reset_index(drop=True)
 
         st.write("Final Output Preview:")
-        st.dataframe(df_final_cleaned.head(), use_container_width=True)
+        st.dataframe(df_final.head(), use_container_width=True)
+
+        df_final_export = revert_column_names(df_final)
+        csv = df_final_export.to_csv(index=False, header=False).encode('utf-8')
         st.download_button("Download Final CSV (No Header)", data=csv, file_name="final_output.csv")
     else:
-        st.warning("Please complete the previous steps.")
+        st.warning("Please complete all steps before downloading.")
