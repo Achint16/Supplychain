@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 from io import BytesIO
 
-# --- Rename columns for clarity ---
 def rename_columns(df):
     rename_map = {
         'Column1': 'SiteCode',
@@ -14,7 +13,6 @@ def rename_columns(df):
     }
     return df.rename(columns=rename_map)
 
-# --- Revert columns back to Sage X3 format (no headers) ---
 def revert_column_names(df):
     revert_map = {
         'SiteCode': 'Column1',
@@ -26,12 +24,11 @@ def revert_column_names(df):
     }
     return df.rename(columns=revert_map)
 
-# --- Generate pivot table ---
 def generate_pivot(df, pivot_type, group_by_site):
     df['Date'] = df['Date'].astype(str).str.zfill(8)
-    df['Date2'] = pd.to_datetime(df['Date'], format='%Y%m%d')
+    df['Date2'] = pd.to_datetime(df['Date'], format='%Y%m%d', errors='coerce')
     df['Month'] = df['Date2'].dt.to_period('M').dt.to_timestamp()
-    df['Week_Monday'] = df['Date2'].apply(lambda x: x - pd.Timedelta(days=x.weekday()))
+    df['Week_Monday'] = df['Date2'].apply(lambda x: x - pd.Timedelta(days=x.weekday()) if pd.notnull(x) else x)
     df['Site'] = df['SiteCode'] + '-' + df['LocationCode']
 
     index_fields = ['Product', 'Description']
@@ -52,10 +49,8 @@ def generate_pivot(df, pivot_type, group_by_site):
 
     return pivot.reset_index()
 
-# --- Convert pivot table back to Sage X3 flat format ---
 def pivot_to_sage_format(pivot_df):
     pivot_df.columns = [col.strftime('%Y-%m') if isinstance(col, pd.Timestamp) else col for col in pivot_df.columns]
-
     known_cols = [col for col in ['Site', 'Product', 'Description'] if col in pivot_df.columns]
     pivot_flat = pivot_df.melt(id_vars=known_cols, var_name='Month', value_name='Qty')
     pivot_flat['Month'] = pd.to_datetime(pivot_flat['Month'], format='%Y-%m')
@@ -70,15 +65,20 @@ def pivot_to_sage_format(pivot_df):
 
     return pivot_flat[['SiteCode', 'LocationCode', 'Product', 'Description', 'Date', 'Qty']]
 
-# --- Streamlit UI ---
+# -------------------------------
+# Streamlit App UI Starts Here
+# -------------------------------
 st.set_page_config(page_title="Sales Forecast Adjustment", layout="wide")
-st.markdown("<h1 style='text-align:center; color:teal;'>Sales Forecast Adjustment</h1>", unsafe_allow_html=True)
+
+st.markdown(
+    "<h1 style='text-align:center; color:teal;'>Sales Forecast Adjustment</h1>",
+    unsafe_allow_html=True
+)
 
 step = st.radio("Step", ["Upload CSV", "Generate Pivot", "Upload Updated Pivot", "Download Final Output"])
 
-# STEP 1: Upload Sage X3 CSV
 if step == "Upload CSV":
-    uploaded_file = st.file_uploader("Upload Original Sage CSV", type=["csv"])
+    uploaded_file = st.file_uploader("Upload Original CSV", type=["csv"])
     if uploaded_file:
         df = pd.read_csv(uploaded_file, encoding='latin1', usecols=lambda col: col != 'Column7')
         df = rename_columns(df)
@@ -86,15 +86,12 @@ if step == "Upload CSV":
         st.write("Original Data Preview:")
         st.dataframe(df.head(), use_container_width=True)
 
-# STEP 2: Generate Pivot Table
 elif step == "Generate Pivot":
     if 'df_original' in st.session_state:
         pivot_type = st.selectbox("Choose Pivot Type", ["Month", "Week", "Date"])
         group_by_site = st.checkbox("Group by Site (SiteCode + LocationCode)?", value=True)
-
         pivot = generate_pivot(st.session_state['df_original'], pivot_type, group_by_site)
         st.session_state['pivot'] = pivot
-
         st.write("Pivot Table Preview:")
         st.dataframe(pivot.head(), use_container_width=True)
 
@@ -105,7 +102,6 @@ elif step == "Generate Pivot":
     else:
         st.warning("Please upload a CSV first.")
 
-# STEP 3: Upload updated pivot from sales team
 elif step == "Upload Updated Pivot":
     uploaded_pivot = st.file_uploader("Upload Updated Pivot Table", type=["xlsx"])
     if uploaded_pivot:
@@ -115,7 +111,6 @@ elif step == "Upload Updated Pivot":
         st.write("Updated Pivot Preview:")
         st.dataframe(df.head(), use_container_width=True)
 
-# STEP 4: Generate final output in Sage X3 format
 elif step == "Download Final Output":
     if 'pivot_updated' in st.session_state and 'df_original' in st.session_state:
         df_updated = pivot_to_sage_format(st.session_state['pivot_updated'])
@@ -123,20 +118,22 @@ elif step == "Download Final Output":
 
         if 'pivot' in st.session_state:
             df_generated = pivot_to_sage_format(st.session_state['pivot'])
-            for df in [df_updated, df_generated]:
-                df['key'] = df[['SiteCode', 'LocationCode', 'Product', 'Date']].agg('-'.join, axis=1)
+
+            df_updated['key'] = df_updated[['SiteCode', 'LocationCode', 'Product', 'Description', 'Date']].astype(str).agg('-'.join, axis=1)
+            df_generated['key'] = df_generated[['SiteCode', 'LocationCode', 'Product', 'Description', 'Date']].astype(str).agg('-'.join, axis=1)
+
             df_merged = df_updated.merge(df_generated[['key', 'Qty']], on='key', how='left', suffixes=('', '_orig'))
             df_changed = df_merged[df_merged['Qty'] != df_merged['Qty_orig']].drop(columns=['key', 'Qty_orig'])
-            df_final = pd.concat([df_original, df_changed]).drop_duplicates(subset=['SiteCode', 'LocationCode', 'Product', 'Date'], keep='last').reset_index(drop=True)
-        else:
-            df_final = pd.concat([df_original, df_updated]).drop_duplicates(subset=['SiteCode', 'LocationCode', 'Product', 'Date'], keep='last').reset_index(drop=True)
 
-        df_final = revert_column_names(df_final)
-        csv = df_final.to_csv(index=False, header=False).encode('utf-8')
+            df_final = pd.concat([df_original, df_changed]).drop_duplicates(keep='last').reset_index(drop=True)
+        else:
+            df_final = pd.concat([df_original, df_updated]).drop_duplicates(keep='last').reset_index(drop=True)
+
+        df_final_cleaned = revert_column_names(df_final)
+        csv = df_final_cleaned.to_csv(index=False, header=False).encode('utf-8')
 
         st.write("Final Output Preview:")
-        st.dataframe(df_final.head(), use_container_width=True)
-
+        st.dataframe(df_final_cleaned.head(), use_container_width=True)
         st.download_button("Download Final CSV (No Header)", data=csv, file_name="final_output.csv")
     else:
         st.warning("Please complete the previous steps.")
