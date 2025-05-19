@@ -29,36 +29,29 @@ def generate_pivot(df):
     df['Date2'] = pd.to_datetime(df['Date'], format='%Y%m%d', errors='coerce')
     df['Month'] = df['Date2'].dt.to_period('M').dt.to_timestamp()
     df['Site'] = df['SiteCode'] + '-' + df['LocationCode']
-    df['Qty'] = pd.to_numeric(df['Qty'], errors='coerce').round(2)
-    df['Description'] = df['Description'].fillna('')
+    df['Qty'] = pd.to_numeric(df['Qty'], errors='coerce').fillna(0)
 
-    # Build a lookup set of valid site-product-month combinations
-    df['MonthStr'] = df['Month'].dt.strftime('%Y-%m')
-    valid_combos = set(df[['Site', 'Product', 'MonthStr']].dropna().astype(str).agg('-'.join, axis=1))
+    # Lookup table for Description
+    desc_lookup = df[['Site', 'Product', 'Description']].drop_duplicates(subset=['Site', 'Product'])
 
+    # Create pivot without Description in index
     pivot = pd.pivot_table(
         df,
-        index=['Site', 'Product', 'Description'],
+        index=['Site', 'Product'],
         columns='Month',
         values='Qty',
         aggfunc='sum'
     ).reset_index()
 
+    # Merge back Description
+    pivot = pd.merge(pivot, desc_lookup, how='left', on=['Site', 'Product'])
+
+    # Reorder columns
+    month_cols = [col for col in pivot.columns if isinstance(col, pd.Timestamp)]
+    pivot = pivot[['Site', 'Product', 'Description'] + month_cols]
+
+    # Format column headers
     pivot.columns = [col.strftime('%Y-%m') if isinstance(col, pd.Timestamp) else col for col in pivot.columns]
-    month_cols = [col for col in pivot.columns if col not in ['Site', 'Product', 'Description']]
-
-    filtered_rows = []
-    for _, row in pivot.iterrows():
-        site = row['Site']
-        product = row['Product']
-        row_dict = row.to_dict()
-        for m in month_cols:
-            key = f"{site}-{product}-{m}"
-            if key not in valid_combos:
-                row_dict[m] = pd.NA
-        filtered_rows.append(row_dict)
-
-    pivot = pd.DataFrame(filtered_rows)
     return pivot
 
 def pivot_to_sage_format(pivot_df):
@@ -68,7 +61,7 @@ def pivot_to_sage_format(pivot_df):
     pivot_long['Date'] = pivot_long['Month'].dt.to_period('M').dt.start_time.dt.strftime('%Y%m%d')
     pivot_long['SiteCode'] = pivot_long['Site'].str.split('-').str[0]
     pivot_long['LocationCode'] = pivot_long['Site'].str.split('-').str[1]
-    pivot_long['Qty'] = pd.to_numeric(pivot_long['Qty'], errors='coerce').round(2)
+    pivot_long['Qty'] = pd.to_numeric(pivot_long['Qty'], errors='coerce')
     return pivot_long[['SiteCode', 'LocationCode', 'Product', 'Description', 'Date', 'Qty']]
 
 # ---------- STREAMLIT APP ----------
@@ -81,7 +74,7 @@ step = st.radio("Step", ["Upload Sage X3 File", "Generate Pivot", "Upload Modifi
 if step == "Upload Sage X3 File":
     uploaded_file = st.file_uploader("Upload Original CSV from Sage X3", type=["csv"])
     if uploaded_file:
-        df = pd.read_csv(uploaded_file, encoding='latin1', usecols=lambda col: col != 'Column7')
+        df = pd.read_csv(uploaded_file, encoding='latin1', header=0, usecols=lambda col: col != 'Column7')
         df = rename_columns(df)
         st.session_state['df_original'] = df
         st.write("Preview:", df.head())
@@ -115,37 +108,25 @@ elif step == "Download Final Sage X3 Format":
             df['key'] = df[['SiteCode', 'LocationCode', 'Product', 'Date']].astype(str).agg('-'.join, axis=1)
 
         merged = updated_flat.merge(original_flat[['key', 'Qty']], on='key', how='left', suffixes=('', '_orig'))
-        merged['Qty'] = pd.to_numeric(merged['Qty'], errors='coerce').round(2)
-        merged['Qty_orig'] = pd.to_numeric(merged['Qty_orig'], errors='coerce').round(2)
+        merged['Qty'] = pd.to_numeric(merged['Qty'], errors='coerce')
+        merged['Qty_orig'] = pd.to_numeric(merged['Qty_orig'], errors='coerce')
 
-        original_keys = set(st.session_state['df_original'][['SiteCode', 'LocationCode', 'Product', 'Date']].astype(str).agg('-'.join, axis=1))
-        df_changed = updated_flat[updated_flat['Qty'].notna()].copy()
-        df_changed['key'] = df_changed[['SiteCode', 'LocationCode', 'Product', 'Date']].astype(str).agg('-'.join, axis=1)
-        df_changed = df_changed[df_changed['key'].isin(original_keys) | (df_changed['Qty'] == 0)]
-        df_changed['key'] = df_changed[['SiteCode', 'LocationCode', 'Product', 'Date']].astype(str).agg('-'.join, axis=1)
-        df_changed = df_changed.drop(columns=['key'])
+        df_changed = merged[(merged['Qty_orig'].isna()) | (abs(merged['Qty'] - merged['Qty_orig']) > 1e-6)].drop(columns=['Qty_orig', 'key'])
 
         original_df = st.session_state['df_original'].copy()
         original_df['Date'] = original_df['Date'].astype(str).str.zfill(8)
-        original_df['Qty'] = pd.to_numeric(original_df['Qty'], errors='coerce').round(2)
+        original_df['Qty'] = pd.to_numeric(original_df['Qty'], errors='coerce')
+
         original_df['key'] = original_df[['SiteCode', 'LocationCode', 'Product', 'Date']].astype(str).agg('-'.join, axis=1)
         df_changed['key'] = df_changed[['SiteCode', 'LocationCode', 'Product', 'Date']].astype(str).agg('-'.join, axis=1)
 
-        # Only remove products entirely missing in modified pivot
-        updated_keys = st.session_state['pivot_modified'].copy()
-        updated_keys['key'] = updated_keys['Site'].astype(str) + '-' + updated_keys['Product'].astype(str)
-        original_df['Site'] = original_df['SiteCode'] + '-' + original_df['LocationCode']
-        original_df['pivot_key'] = original_df['Site'].astype(str) + '-' + original_df['Product'].astype(str)
-        original_df = original_df[original_df['pivot_key'].isin(set(updated_keys['key']))].copy().drop(columns='pivot_key')
-        # Ensure we keep all original values (minus removed products), and only overwrite true edits
-        original_df = original_df[~original_df['key'].isin(df_changed['key'])]
-        final_df = pd.concat([original_df, df_changed])
-        final_df = final_df.drop_duplicates(subset='key', keep='last')
-        final_df = final_df[final_df[['SiteCode', 'LocationCode', 'Product', 'Date', 'Qty']].notna().all(axis=1)]
-        final_df = final_df.drop(columns='key')
+        original_df = original_df[~original_df['key'].isin(set(df_changed['key']))]
 
+        final_df = pd.concat([original_df, df_changed], ignore_index=True)
         final_df = final_df[final_df[['SiteCode', 'LocationCode', 'Product', 'Date', 'Qty']].notna().all(axis=1)]
         final_df = final_df[final_df['Product'].astype(str).str.strip() != '']
+        final_df = final_df.drop(columns='key')
+
         df_export = revert_column_names(final_df)
         df_export = df_export[['Column1', 'Column2', 'Column3', 'Column4', 'Column5', 'Column6']]
         csv = df_export.to_csv(index=False, header=False).encode('utf-8')
