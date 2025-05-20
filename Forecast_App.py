@@ -31,10 +31,8 @@ def generate_pivot(df):
     df['Site'] = df['SiteCode'] + '-' + df['LocationCode']
     df['Qty'] = pd.to_numeric(df['Qty'], errors='coerce').fillna(0)
 
-    # Lookup table for Description
     desc_lookup = df[['Site', 'Product', 'Description']].drop_duplicates(subset=['Site', 'Product'])
 
-    # Create pivot without Description in index
     pivot = pd.pivot_table(
         df,
         index=['Site', 'Product'],
@@ -43,14 +41,9 @@ def generate_pivot(df):
         aggfunc='sum'
     ).reset_index()
 
-    # Merge back Description
     pivot = pd.merge(pivot, desc_lookup, how='left', on=['Site', 'Product'])
-
-    # Reorder columns
     month_cols = [col for col in pivot.columns if isinstance(col, pd.Timestamp)]
     pivot = pivot[['Site', 'Product', 'Description'] + month_cols]
-
-    # Format column headers
     pivot.columns = [col.strftime('%Y-%m') if isinstance(col, pd.Timestamp) else col for col in pivot.columns]
     return pivot
 
@@ -104,29 +97,40 @@ elif step == "Download Final Sage X3 Format":
         updated_flat = pivot_to_sage_format(st.session_state['pivot_modified'])
         original_flat = pivot_to_sage_format(st.session_state['pivot'])
 
-        for df in [original_flat, updated_flat]:
-            df['key'] = df[['SiteCode', 'LocationCode', 'Product', 'Date']].astype(str).agg('-'.join, axis=1)
+        # Align on MonthStart
+        updated_flat['MonthStart'] = updated_flat['Date']
+        original_flat['ParsedDate'] = pd.to_datetime(original_flat['Date'], format='%Y%m%d', errors='coerce')
+        original_flat['MonthStart'] = original_flat['ParsedDate'].dt.to_period('M').dt.start_time.dt.strftime('%Y%m%d')
 
+        # Generate composite keys
+        updated_flat['key'] = updated_flat[['SiteCode', 'LocationCode', 'Product', 'MonthStart']].agg('-'.join, axis=1)
+        original_flat['key'] = original_flat[['SiteCode', 'LocationCode', 'Product', 'MonthStart']].agg('-'.join, axis=1)
+
+        # Compare for changes
         merged = updated_flat.merge(original_flat[['key', 'Qty']], on='key', how='left', suffixes=('', '_orig'))
         merged['Qty'] = pd.to_numeric(merged['Qty'], errors='coerce')
         merged['Qty_orig'] = pd.to_numeric(merged['Qty_orig'], errors='coerce')
+        df_changed = merged[(merged['Qty_orig'].isna()) | (abs(merged['Qty'] - merged['Qty_orig']) > 1e-6)].drop(columns=['Qty_orig'])
 
-        df_changed = merged[(merged['Qty_orig'].isna()) | (abs(merged['Qty'] - merged['Qty_orig']) > 1e-6)].drop(columns=['Qty_orig', 'key'])
+        # Drop original rows in same month and replace
+        df_original = st.session_state['df_original'].copy()
+        df_original['Date'] = df_original['Date'].astype(str).str.zfill(8)
+        df_original['Qty'] = pd.to_numeric(df_original['Qty'], errors='coerce')
+        df_original['ParsedDate'] = pd.to_datetime(df_original['Date'], format='%Y%m%d', errors='coerce')
+        df_original['MonthStart'] = df_original['ParsedDate'].dt.to_period('M').dt.start_time.dt.strftime('%Y%m%d')
+        df_original['key'] = df_original[['SiteCode', 'LocationCode', 'Product', 'MonthStart']].agg('-'.join, axis=1)
+        df_changed['key'] = df_changed[['SiteCode', 'LocationCode', 'Product', 'MonthStart']].agg('-'.join, axis=1)
 
-        original_df = st.session_state['df_original'].copy()
-        original_df['Date'] = original_df['Date'].astype(str).str.zfill(8)
-        original_df['Qty'] = pd.to_numeric(original_df['Qty'], errors='coerce')
+        unchanged_keys = set(df_original['key']) - set(df_changed['key'])
+        df_original_clean = df_original[df_original['key'].isin(unchanged_keys)]
 
-        original_df['key'] = original_df[['SiteCode', 'LocationCode', 'Product', 'Date']].astype(str).agg('-'.join, axis=1)
-        df_changed['key'] = df_changed[['SiteCode', 'LocationCode', 'Product', 'Date']].astype(str).agg('-'.join, axis=1)
-
-        original_df = original_df[~original_df['key'].isin(set(df_changed['key']))]
-
-        final_df = pd.concat([original_df, df_changed], ignore_index=True)
+        # Final merged DataFrame
+        final_df = pd.concat([df_original_clean, df_changed.drop(columns='key')], ignore_index=True)
         final_df = final_df[final_df[['SiteCode', 'LocationCode', 'Product', 'Date', 'Qty']].notna().all(axis=1)]
         final_df = final_df[final_df['Product'].astype(str).str.strip() != '']
-        final_df = final_df.drop(columns='key')
+        final_df = final_df.drop(columns=['key', 'ParsedDate', 'MonthStart'], errors='ignore')
 
+        # Export back to Sage X3 format
         df_export = revert_column_names(final_df)
         df_export = df_export[['Column1', 'Column2', 'Column3', 'Column4', 'Column5', 'Column6']]
         csv = df_export.to_csv(index=False, header=False).encode('utf-8')
