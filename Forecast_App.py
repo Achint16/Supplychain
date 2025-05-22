@@ -24,39 +24,6 @@ def revert_column_names(df):
         'Qty': 'Column6'
     })
 
-def generate_pivot(df):
-    df['Date'] = df['Date'].astype(str).str.zfill(8)
-    df['Date2'] = pd.to_datetime(df['Date'], format='%Y%m%d', errors='coerce')
-    df['Month'] = df['Date2'].dt.to_period('M').dt.to_timestamp()
-    df['Site'] = df['SiteCode'] + '-' + df['LocationCode']
-    df['Qty'] = pd.to_numeric(df['Qty'], errors='coerce').fillna(0)
-
-    desc_lookup = df[['Site', 'Product', 'Description']].drop_duplicates(subset=['Site', 'Product'])
-
-    pivot = pd.pivot_table(
-        df,
-        index=['Site', 'Product'],
-        columns='Month',
-        values='Qty',
-        aggfunc='sum'
-    ).reset_index()
-
-    pivot = pd.merge(pivot, desc_lookup, how='left', on=['Site', 'Product'])
-    month_cols = [col for col in pivot.columns if isinstance(col, pd.Timestamp)]
-    pivot = pivot[['Site', 'Product', 'Description'] + month_cols]
-    pivot.columns = [col.strftime('%Y-%m') if isinstance(col, pd.Timestamp) else col for col in pivot.columns]
-    return pivot
-
-def pivot_to_sage_format(pivot_df):
-    pivot_long = pivot_df.melt(id_vars=['Site', 'Product', 'Description'], var_name='Month', value_name='Qty')
-    pivot_long['Month'] = pd.to_datetime(pivot_long['Month'], errors='coerce')
-    pivot_long = pivot_long.dropna(subset=['Month'])
-    pivot_long['Date'] = pivot_long['Month'].dt.to_period('M').dt.start_time.dt.strftime('%Y%m%d')
-    pivot_long['SiteCode'] = pivot_long['Site'].str.split('-').str[0]
-    pivot_long['LocationCode'] = pivot_long['Site'].str.split('-').str[1]
-    pivot_long['Qty'] = pd.to_numeric(pivot_long['Qty'], errors='coerce')
-    return pivot_long[['SiteCode', 'LocationCode', 'Product', 'Description', 'Date', 'Qty']]
-
 # ---------- STREAMLIT APP ----------
 
 st.set_page_config(page_title="Sales Forecast Adjustment", layout="wide")
@@ -74,7 +41,28 @@ if step == "Upload Sage X3 File":
 
 elif step == "Generate Pivot":
     if 'df_original' in st.session_state:
-        pivot = generate_pivot(st.session_state['df_original'])
+        df = st.session_state['df_original'].copy()
+        df['Date'] = df['Date'].astype(str).str.zfill(8)
+        df['Date2'] = pd.to_datetime(df['Date'], format='%Y%m%d', errors='coerce')
+        df['Month'] = df['Date2'].dt.to_period('M').dt.to_timestamp()
+        df['Site'] = df['SiteCode'] + '-' + df['LocationCode']
+        df['Qty'] = pd.to_numeric(df['Qty'], errors='coerce').fillna(0)
+
+        desc_lookup = df[['Site', 'Product', 'Description']].drop_duplicates(subset=['Site', 'Product'])
+
+        pivot = pd.pivot_table(
+            df,
+            index=['Site', 'Product'],
+            columns='Month',
+            values='Qty',
+            aggfunc='sum'
+        ).reset_index()
+
+        pivot = pd.merge(pivot, desc_lookup, how='left', on=['Site', 'Product'])
+        month_cols = [col for col in pivot.columns if isinstance(col, pd.Timestamp)]
+        pivot = pivot[['Site', 'Product', 'Description'] + month_cols]
+        pivot.columns = [col.strftime('%Y-%m') if isinstance(col, pd.Timestamp) else col for col in pivot.columns]
+
         st.session_state['pivot'] = pivot
         st.dataframe(pivot.fillna('').head(), use_container_width=True)
         buffer = BytesIO()
@@ -93,48 +81,75 @@ elif step == "Upload Modified Pivot":
         st.dataframe(df.head(), use_container_width=True)
 
 elif step == "Download Final Sage X3 Format":
-    if 'pivot_modified' in st.session_state and 'pivot' in st.session_state:
-        updated_flat = pivot_to_sage_format(st.session_state['pivot_modified'])
-        original_flat = pivot_to_sage_format(st.session_state['pivot'])
+    if 'pivot_modified' in st.session_state and 'df_original' in st.session_state:
+        original_df = st.session_state['df_original'].copy()
+        pivot_df = st.session_state['pivot_modified'].copy()
 
-        updated_flat['MonthStart'] = updated_flat['Date']
-        original_flat['ParsedDate'] = pd.to_datetime(original_flat['Date'], format='%Y%m%d', errors='coerce')
-        original_flat['MonthStart'] = original_flat['ParsedDate'].dt.to_period('M').dt.start_time.dt.strftime('%Y%m%d')
+        # Preprocess original
+        original_df['Date'] = original_df['Date'].astype(str).str.zfill(8)
+        original_df['ParsedDate'] = pd.to_datetime(original_df['Date'], format='%Y%m%d', errors='coerce')
+        original_df['MonthStart'] = original_df['ParsedDate'].dt.to_period('M').dt.start_time
+        original_df['Site'] = original_df['SiteCode'] + '-' + original_df['LocationCode']
+        original_df['Qty'] = pd.to_numeric(original_df['Qty'], errors='coerce')
+        original_df['key'] = original_df[['Site', 'Product', 'MonthStart']].astype(str).agg('-'.join, axis=1)
 
-        updated_flat['key'] = updated_flat[['SiteCode', 'LocationCode', 'Product', 'MonthStart']].agg('-'.join, axis=1)
-        original_flat['key'] = original_flat[['SiteCode', 'LocationCode', 'Product', 'MonthStart']].agg('-'.join, axis=1)
+        # Build pivot_long
+        pivot_long = pivot_df.melt(id_vars=['Site', 'Product', 'Description'], var_name='Month', value_name='Qty')
+        pivot_long['Month'] = pd.to_datetime(pivot_long['Month'], errors='coerce')
+        pivot_long = pivot_long.dropna(subset=['Month'])
+        pivot_long['MonthStart'] = pivot_long['Month'].dt.to_period('M').dt.start_time
+        pivot_long['key'] = pivot_long[['Site', 'Product', 'MonthStart']].astype(str).agg('-'.join, axis=1)
+        pivot_long['SiteCode'] = pivot_long['Site'].str.split('-').str[0]
+        pivot_long['LocationCode'] = pivot_long['Site'].str.split('-').str[1]
 
-        merged = updated_flat.merge(original_flat[['key', 'Qty']], on='key', how='left', suffixes=('', '_orig'))
-        merged['Qty'] = pd.to_numeric(merged['Qty'], errors='coerce')
-        merged['Qty_orig'] = pd.to_numeric(merged['Qty_orig'], errors='coerce')
+        # Reallocate or create new rows
+        reallocated_rows = []
+        new_rows = []
 
-        df_changed = merged[(merged['Qty_orig'].isna()) | (abs(merged['Qty'] - merged['Qty_orig']) > 1e-6)].drop(columns=['Qty_orig'])
+        for _, row in pivot_long.iterrows():
+            key = row['key']
+            updated_qty = row['Qty']
 
-        df_original = st.session_state['df_original'].copy()
-        df_original['Date'] = df_original['Date'].astype(str).str.zfill(8)
-        df_original['Qty'] = pd.to_numeric(df_original['Qty'], errors='coerce')
-        df_original['ParsedDate'] = pd.to_datetime(df_original['Date'], format='%Y%m%d', errors='coerce')
-        df_original['MonthStart'] = df_original['ParsedDate'].dt.to_period('M').dt.start_time.dt.strftime('%Y%m%d')
-        df_original['key'] = df_original[['SiteCode', 'LocationCode', 'Product', 'MonthStart']].agg('-'.join, axis=1)
-        df_changed['key'] = df_changed[['SiteCode', 'LocationCode', 'Product', 'MonthStart']].agg('-'.join, axis=1)
+            if key in original_df['key'].values:
+                subset = original_df[original_df['key'] == key].copy()
+                total_original = subset['Qty'].sum()
+                if total_original > 0:
+                    weights = subset['Qty'] / total_original
+                    subset['Qty'] = weights * updated_qty
+                    reallocated_rows.append(subset)
+                else:
+                    new_rows.append(pd.DataFrame([{
+                        'SiteCode': row['SiteCode'],
+                        'LocationCode': row['LocationCode'],
+                        'Product': row['Product'],
+                        'Description': row['Description'],
+                        'Date': row['MonthStart'].strftime('%Y%m%d'),
+                        'Qty': updated_qty
+                    }]))
+            else:
+                new_rows.append(pd.DataFrame([{
+                    'SiteCode': row['SiteCode'],
+                    'LocationCode': row['LocationCode'],
+                    'Product': row['Product'],
+                    'Description': row['Description'],
+                    'Date': row['MonthStart'].strftime('%Y%m%d'),
+                    'Qty': updated_qty
+                }]))
 
-        # Remove unchanged rows
-        unchanged_keys = set(df_original['key']) - set(df_changed['key'])
-        df_original_clean = df_original[df_original['key'].isin(unchanged_keys)]
+        # Assemble final
+        reallocated_df = pd.concat(reallocated_rows, ignore_index=True) if reallocated_rows else pd.DataFrame()
+        new_df = pd.concat(new_rows, ignore_index=True) if new_rows else pd.DataFrame()
+        touched_keys = set(pivot_long['key'])
+        untouched_df = original_df[~original_df['key'].isin(touched_keys)].copy()
 
-        # REMOVE deleted products
-        products_modified = set(df_changed['Product'].unique())
-        df_original_clean = df_original_clean[df_original_clean['Product'].isin(products_modified)]
-
-        # Final output
-        final_df = pd.concat([df_original_clean, df_changed.drop(columns='key')], ignore_index=True)
+        final_df = pd.concat([untouched_df, reallocated_df, new_df], ignore_index=True)
+        final_df = final_df[['SiteCode', 'LocationCode', 'Product', 'Description', 'Date', 'Qty']]
         final_df = final_df[final_df[['SiteCode', 'LocationCode', 'Product', 'Date', 'Qty']].notna().all(axis=1)]
         final_df = final_df[final_df['Product'].astype(str).str.strip() != '']
-        final_df = final_df.drop(columns=['key', 'ParsedDate', 'MonthStart'], errors='ignore')
 
         df_export = revert_column_names(final_df)
         df_export = df_export[['Column1', 'Column2', 'Column3', 'Column4', 'Column5', 'Column6']]
         csv = df_export.to_csv(index=False, header=False).encode('utf-8')
         st.download_button("Download Final CSV for Sage X3", data=csv, file_name="final_output.csv")
     else:
-        st.warning("Please upload both the original and modified pivot.")
+        st.warning("Please upload both the original Sage X3 file and modified pivot.")
